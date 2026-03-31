@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Contenteditable placeholder via CSS */
+[contenteditable][data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  pointer-events: none;
+  display: block;
+}
+
+/* Smooth caret */
+[contenteditable] {
+  caret-color: #374151;
+}
+
+/* Selection highlight */
+::selection {
+  background-color: #dbeafe;
+  color: inherit;
+}
+
+/* Prompt bar transition */
+.prompt-bar-enter {
+  animation: promptBarIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.prompt-bar-leave {
+  animation: promptBarOut 0.14s ease-in forwards;
+}
+
+@keyframes promptBarIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scaleY(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes promptBarOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scaleY(0.94);
+  }
+}
+
+
+/* Pill animations */
+@keyframes pillIn {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pillOut {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+}
+
+/* Replaced text flash */
+.text-replaced {
+  animation: flashReplace 0.6s ease-out;
+}
+
+@keyframes flashReplace {
+  0% { background-color: #dbeafe; }
+  100% { background-color: transparent; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
