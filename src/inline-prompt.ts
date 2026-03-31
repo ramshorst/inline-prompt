@@ -15,14 +15,21 @@ let inPromptMode = false;
 let isMouseDown = false;
 
 // Undo/redo intercept
-let lastPromptUsed = '';
-let lastEditOriginalText = '';
-let lastEditNewText = '';
-let interceptNextUndo = false;
+interface EditEntry {
+  prompt: string;
+  originalText: string;
+  newText: string;
+  container: HTMLElement;
+}
+
+let editStack: EditEntry[] = [];         // all AI edits in order; Ctrl+Z walks backwards
+let lastEditOriginalText = '';           // kept for redo (lastRestoredNode target)
+let lastEditNewText = '';                // kept for redo
+let interceptNextUndo = false;           // true while accept bar is showing
 let promptOpenedByUndo = false;
-let lastRestoredNode: Text | null = null; // text node inserted during undo, target for redo
-let loaderEl: HTMLElement | null = null;       // direct ref — avoids getElementById failure
-let lastEditContainer: HTMLElement | null = null; // wraps diff nodes for manual undo
+let lastRestoredNode: Text | null = null;
+let loaderEl: HTMLElement | null = null;
+let lastEditContainer: HTMLElement | null = null;
 let highlightSpans: HTMLElement[] = [];
 
 let promptWrapper: HTMLElement | null = null;
@@ -60,6 +67,7 @@ export function destroyInlinePrompt(): void {
   promptInput = null;
   captured = null;
   inPromptMode = false;
+  editStack = [];
   interceptNextUndo = false;
   promptOpenedByUndo = false;
   lastRestoredNode = null;
@@ -78,6 +86,8 @@ function buildUI(): void {
     bottom: 20px;
     z-index: 9998;
     display: none;
+    flex-direction: column;
+    gap: 8px;
     pointer-events: none;
   `;
 
@@ -263,6 +273,7 @@ function buildUI(): void {
     if (lastRestoredNode?.parentNode && lastEditNewText) {
       hideUI();
       applyDiffToNode(lastRestoredNode, lastEditOriginalText, lastEditNewText);
+      editStack.push({ prompt: editStack[editStack.length - 1]?.prompt ?? '', originalText: lastEditOriginalText, newText: lastEditNewText, container: lastEditContainer! });
       lastRestoredNode = null;
       interceptNextUndo = true;
       showAcceptBar();
@@ -359,7 +370,7 @@ function showPill(animate: boolean): void {
 
   bar.style.display = 'none';
   pillContainer.style.display = 'flex';
-  promptWrapper.style.display = 'block';
+  promptWrapper.style.display = 'flex';
 
   if (animate) {
     const pill = promptWrapper.querySelector('#prompt-pill') as HTMLElement;
@@ -463,6 +474,7 @@ function onGlobalKeydown(e: KeyboardEvent): void {
       e.preventDefault();
       hideUI();
       applyDiffToNode(lastRestoredNode, lastEditOriginalText, lastEditNewText);
+      editStack.push({ prompt: editStack[editStack.length - 1]?.prompt ?? '', originalText: lastEditOriginalText, newText: lastEditNewText, container: lastEditContainer! });
       lastRestoredNode = null;
       interceptNextUndo = true;
       showAcceptBar();
@@ -480,9 +492,9 @@ function onGlobalKeydown(e: KeyboardEvent): void {
       return;
     }
 
-    // First Ctrl+Z after AI edit — let native undo run first (for manual edits),
-    // then if no historyUndo input fires within 50ms, do the AI undo.
-    if (interceptNextUndo && lastEditContainer?.parentNode) {
+    // Ctrl+Z after any AI edit — let native undo run first (for manual edits),
+    // then if no historyUndo input fires within 100ms, do the AI undo.
+    if (findLastUndoable()) {
       if (undoCheckTimer) clearTimeout(undoCheckTimer);
       undoCheckTimer = setTimeout(() => {
         undoCheckTimer = null;
@@ -556,7 +568,6 @@ function onPromptInput(): void {
 async function submitPrompt(userPrompt: string): Promise<void> {
   if (!captured) return;
   const snap = captured;
-  lastPromptUsed = userPrompt;
   promptOpenedByUndo = false;
 
   // Hide the bar immediately — user sees the loader in the text instead
@@ -569,6 +580,7 @@ async function submitPrompt(userPrompt: string): Promise<void> {
     const ctx = getDocumentContext(snap.range);
     const result = await callClaude(snap.text, userPrompt, ctx);
     replaceLoaderWithDiff(snap.text, result);
+    editStack.push({ prompt: userPrompt, originalText: snap.text, newText: result, container: lastEditContainer! });
     interceptNextUndo = true;
     showAcceptBar();
   } catch (err) {
@@ -769,7 +781,7 @@ function showAcceptBar(): void {
   const bar = promptWrapper.querySelector('#accept-bar') as HTMLElement;
   positionWrapper();
   if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-  promptWrapper.style.display = 'block';
+  promptWrapper.style.display = 'flex';
   bar.style.display = 'flex';
 }
 
@@ -813,18 +825,32 @@ function acceptChanges(): void {
   }
 }
 
+function findLastUndoable(): EditEntry | null {
+  for (let i = editStack.length - 1; i >= 0; i--) {
+    if (editStack[i].container.parentNode) return editStack[i];
+  }
+  return null;
+}
+
 function performAIUndo(): void {
-  if (!interceptNextUndo || !lastEditContainer?.parentNode) return;
+  const entry = findLastUndoable();
+  if (!entry) return;
+
   interceptNextUndo = false;
   hideAcceptBar();
   highlightSpans = [];
 
-  const parent = lastEditContainer.parentNode!;
-  const restored = document.createTextNode(lastEditOriginalText);
-  parent.insertBefore(restored, lastEditContainer);
-  lastEditContainer.remove();
-  lastEditContainer = null;
+  // Remove this entry from the stack
+  editStack.splice(editStack.indexOf(entry), 1);
+
+  const parent = entry.container.parentNode!;
+  const restored = document.createTextNode(entry.originalText);
+  parent.insertBefore(restored, entry.container);
+  entry.container.remove();
+  if (lastEditContainer === entry.container) lastEditContainer = null;
   lastRestoredNode = restored;
+  lastEditOriginalText = entry.originalText;
+  lastEditNewText = entry.newText;
 
   editor?.focus();
   const range = document.createRange();
@@ -834,13 +860,13 @@ function performAIUndo(): void {
   sel?.addRange(range);
 
   captured = {
-    text: lastEditOriginalText,
+    text: entry.originalText,
     range: range.cloneRange(),
     rect: range.getBoundingClientRect(),
   };
   positionWrapper();
-  promptWrapper!.style.display = 'block';
+  promptWrapper!.style.display = 'flex';
   promptOpenedByUndo = true;
-  activatePromptModeWithPrompt(lastPromptUsed);
+  activatePromptModeWithPrompt(entry.prompt);
 }
 

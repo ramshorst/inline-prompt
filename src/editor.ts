@@ -60,7 +60,7 @@ export function renderEditor(apiKey: string, onLogout: () => void): void {
     display: flex;
     align-items: flex-end;
     gap: 10px;
-    z-index: 50;
+    z-index: 9998;
     animation: catFadeIn 0.4s ease both;
   `;
 
