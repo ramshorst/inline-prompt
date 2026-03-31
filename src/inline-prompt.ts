@@ -1,5 +1,4 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { computeDiff, diffAnimDuration } from './diff';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +23,7 @@ let promptOpenedByUndo = false;
 let lastRestoredNode: Text | null = null; // text node inserted during undo, target for redo
 let loaderEl: HTMLElement | null = null;       // direct ref — avoids getElementById failure
 let lastEditContainer: HTMLElement | null = null; // wraps diff nodes for manual undo
+let highlightSpans: HTMLElement[] = [];
 
 let promptWrapper: HTMLElement | null = null;
 let promptInput: HTMLInputElement | null = null;
@@ -65,6 +65,7 @@ export function destroyInlinePrompt(): void {
   lastRestoredNode = null;
   loaderEl = null;
   lastEditContainer = null;
+  highlightSpans = [];
   editor = null;
 }
 
@@ -172,18 +173,61 @@ function buildUI(): void {
       </button>
     </div>
 
-    <div id="undo-hint" style="display: none; justify-content: center; pointer-events: none;">
-      <span id="undo-hint-label" style="
-        color: #9ca3af;
-        font-size: 11px;
+    <div id="accept-bar" style="display: none; justify-content: center; gap: 6px; pointer-events: all;">
+      <button id="btn-accept" style="
+        display: flex; align-items: center; gap: 6px;
+        background: #111827; color: white;
+        border: none; border-radius: 9999px;
+        padding: 7px 14px 7px 16px;
+        font-size: 12px; font-weight: 500;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 9999px;
-        padding: 6px 14px;
-        box-shadow: 0 1px 6px rgba(0,0,0,0.07);
-        white-space: nowrap;
-      "></span>
+        cursor: pointer; white-space: nowrap;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      ">
+        Accept
+        <span style="
+          font-family: monospace; font-size: 10px;
+          background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.25);
+          border-radius: 4px; padding: 1px 5px; color: rgba(255,255,255,0.75); line-height: 1.5;
+        ">↵</span>
+      </button>
+      <button id="btn-undo" style="
+        display: flex; align-items: center; gap: 6px;
+        background: white; color: #6b7280;
+        border: 1px solid #e5e7eb; border-radius: 9999px;
+        padding: 7px 14px 7px 16px;
+        font-size: 12px; font-weight: 500;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        cursor: pointer; white-space: nowrap;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+      ">
+        Undo
+        <span id="undo-kbd" style="
+          font-family: monospace; font-size: 10px;
+          background: #f3f4f6; border: 1px solid #e5e7eb;
+          border-radius: 4px; padding: 1px 5px; color: #9ca3af; line-height: 1.5;
+        "></span>
+      </button>
+    </div>
+
+    <div id="redo-hint" style="display: none; justify-content: center; pointer-events: all;">
+      <button id="btn-redo" style="
+        display: flex; align-items: center; gap: 6px;
+        background: white; color: #6b7280;
+        border: 1px solid #e5e7eb; border-radius: 9999px;
+        padding: 7px 14px 7px 16px;
+        font-size: 12px; font-weight: 500;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        cursor: pointer; white-space: nowrap;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+      ">
+        Redo
+        <span id="redo-kbd" style="
+          font-family: monospace; font-size: 10px;
+          background: #f3f4f6; border: 1px solid #e5e7eb;
+          border-radius: 4px; padding: 1px 5px; color: #9ca3af; line-height: 1.5;
+        "></span>
+      </button>
     </div>
   `;
 
@@ -200,6 +244,29 @@ function buildUI(): void {
   sendBtn.addEventListener('click', () => {
     const val = promptInput!.value.trim();
     if (val) submitPrompt(val);
+  });
+
+  const isMac = /Mac|iPhone|iPad/i.test(navigator.platform);
+
+  const acceptBtn = promptWrapper.querySelector('#btn-accept') as HTMLButtonElement;
+  acceptBtn.addEventListener('click', acceptChanges);
+
+  const undoKbd = promptWrapper.querySelector('#undo-kbd') as HTMLElement;
+  undoKbd.textContent = isMac ? '⌘Z' : 'Ctrl+Z';
+  const undoBtn = promptWrapper.querySelector('#btn-undo') as HTMLButtonElement;
+  undoBtn.addEventListener('click', performAIUndo);
+
+  const redoKbd = promptWrapper.querySelector('#redo-kbd') as HTMLElement;
+  redoKbd.textContent = isMac ? '⌘⇧Z' : 'Ctrl+Shift+Z';
+  const redoBtn = promptWrapper.querySelector('#btn-redo') as HTMLButtonElement;
+  redoBtn.addEventListener('click', () => {
+    if (lastRestoredNode?.parentNode && lastEditNewText) {
+      hideUI();
+      applyDiffToNode(lastRestoredNode, lastEditOriginalText, lastEditNewText);
+      lastRestoredNode = null;
+      interceptNextUndo = true;
+      showAcceptBar();
+    }
   });
 }
 
@@ -237,7 +304,20 @@ function onEditorInput(e: Event): void {
     if (undoCheckTimer) { clearTimeout(undoCheckTimer); undoCheckTimer = null; }
   } else if (inputType !== 'historyRedo') {
     lastRestoredNode = null; // new manual edit invalidates redo
+    if (highlightSpans.length > 0) fadeOutHighlights();
   }
+}
+
+function fadeOutHighlights(): void {
+  const spans = highlightSpans;
+  highlightSpans = [];
+  interceptNextUndo = false;
+  hideAcceptBar();
+  spans.forEach(span => {
+    span.style.transition = 'background-color 0.4s ease';
+    span.style.backgroundColor = 'transparent';
+  });
+  setTimeout(() => spans.forEach(span => { span.style.transition = ''; }), 400);
 }
 
 function checkSelection(): void {
@@ -300,6 +380,8 @@ function hideUI(): void {
     bar.style.animation = 'promptBarOut 0.12s ease-in forwards';
   }
 
+  hideRedoHint();
+
   if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
   hideTimer = setTimeout(() => {
     if (promptWrapper) {
@@ -356,6 +438,8 @@ function activatePromptModeWithPrompt(prompt: string): void {
   promptInput.value = prompt;
   onPromptInput(); // sync hint visibility
   setTimeout(() => promptInput!.focus(), 30);
+
+  if (promptOpenedByUndo) showRedoHint();
 }
 
 function onGlobalKeydown(e: KeyboardEvent): void {
@@ -381,6 +465,7 @@ function onGlobalKeydown(e: KeyboardEvent): void {
       applyDiffToNode(lastRestoredNode, lastEditOriginalText, lastEditNewText);
       lastRestoredNode = null;
       interceptNextUndo = true;
+      showAcceptBar();
       return;
     }
   }
@@ -401,33 +486,7 @@ function onGlobalKeydown(e: KeyboardEvent): void {
       if (undoCheckTimer) clearTimeout(undoCheckTimer);
       undoCheckTimer = setTimeout(() => {
         undoCheckTimer = null;
-        if (!interceptNextUndo || !lastEditContainer?.parentNode) return;
-        interceptNextUndo = false;
-        hideUndoHint();
-
-        const parent = lastEditContainer.parentNode!;
-        const restored = document.createTextNode(lastEditOriginalText);
-        parent.insertBefore(restored, lastEditContainer);
-        lastEditContainer.remove();
-        lastEditContainer = null;
-        lastRestoredNode = restored;
-
-        editor?.focus();
-        const range = document.createRange();
-        range.selectNode(restored);
-        const sel = window.getSelection();
-        sel?.removeAllRanges();
-        sel?.addRange(range);
-
-        captured = {
-          text: lastEditOriginalText,
-          range: range.cloneRange(),
-          rect: range.getBoundingClientRect(),
-        };
-        positionWrapper();
-        promptWrapper!.style.display = 'block';
-        promptOpenedByUndo = true;
-        activatePromptModeWithPrompt(lastPromptUsed);
+        performAIUndo();
       }, 100);
       return; // let native undo run; if it fires historyUndo we'll cancel above
     }
@@ -445,6 +504,13 @@ function onGlobalKeydown(e: KeyboardEvent): void {
         sel?.addRange(savedRange);
       }
     });
+    return;
+  }
+
+  // Enter while accept bar is showing → accept the AI edit
+  if (e.key === 'Enter' && interceptNextUndo && !inPromptMode) {
+    e.preventDefault();
+    acceptChanges();
     return;
   }
 
@@ -495,6 +561,7 @@ async function submitPrompt(userPrompt: string): Promise<void> {
 
   // Hide the bar immediately — user sees the loader in the text instead
   hideUI();
+  hideAcceptBar();
 
   insertLoader(snap);
 
@@ -503,7 +570,7 @@ async function submitPrompt(userPrompt: string): Promise<void> {
     const result = await callClaude(snap.text, userPrompt, ctx);
     replaceLoaderWithDiff(snap.text, result);
     interceptNextUndo = true;
-    showUndoHint();
+    showAcceptBar();
   } catch (err) {
     console.error(err);
     if (editor) editor.setAttribute('contenteditable', 'true');
@@ -547,28 +614,21 @@ function replaceLoaderWithDiff(oldText: string, newText: string): void {
 
   lastEditNewText = newText;
 
-  const diff = computeDiff(oldText, newText);
-  const changedChars = diff.filter(t => t.added).reduce((n, t) => n + t.text.length, 0);
-  const duration = diffAnimDuration(changedChars);
-
-  // Wrap everything in a display:contents span so we can locate it for undo
+  // Wrap in a display:contents span so we can locate it for undo
   const container = document.createElement('span');
   container.style.display = 'contents';
-  const newSpans: HTMLElement[] = [];
 
-  for (const token of diff) {
-    if (!token.added) {
-      container.appendChild(document.createTextNode(token.text));
-    } else {
-      const span = document.createElement('span');
-      span.innerHTML = markdownToHtml(token.text);
-      span.style.backgroundColor = '#fefce8';
-      span.style.borderRadius = '2px';
-      span.style.transition = `background-color ${duration}s ease-out`;
-      newSpans.push(span);
-      container.appendChild(span);
-    }
+  // Apply markdown to the full new text so patterns like **bold text** always render correctly
+  const span = document.createElement('span');
+  span.innerHTML = markdownToHtml(newText);
+  if (oldText !== newText) {
+    span.style.backgroundColor = '#fefce8';
+    span.style.borderRadius = '2px';
+    highlightSpans = [span];
+  } else {
+    highlightSpans = [];
   }
+  container.appendChild(span);
 
   // Swap while still contenteditable=false so the browser doesn't log it
   // as an undo step. Re-enabling contenteditable afterwards clears the
@@ -576,43 +636,28 @@ function replaceLoaderWithDiff(oldText: string, newText: string): void {
   loader.replaceWith(container);
   lastEditContainer = container;
   if (editor) editor.setAttribute('contenteditable', 'true');
-
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    newSpans.forEach(span => { span.style.backgroundColor = 'transparent'; });
-  }));
 }
 
-/** Re-apply a diff to an existing text node (used for Cmd+Shift+Z redo). */
+/** Re-apply an edit to an existing text node (used for Cmd+Shift+Z redo). */
 function applyDiffToNode(node: Text, oldText: string, newText: string): void {
   if (!node.parentNode) return;
-  const diff = computeDiff(oldText, newText);
-  const changedChars = diff.filter(t => t.added).reduce((n, t) => n + t.text.length, 0);
-  const duration = diffAnimDuration(changedChars);
 
   const container = document.createElement('span');
   container.style.display = 'contents';
-  const newSpans: HTMLElement[] = [];
 
-  for (const token of diff) {
-    if (!token.added) {
-      container.appendChild(document.createTextNode(token.text));
-    } else {
-      const span = document.createElement('span');
-      span.innerHTML = markdownToHtml(token.text);
-      span.style.backgroundColor = '#fefce8';
-      span.style.borderRadius = '2px';
-      span.style.transition = `background-color ${duration}s ease-out`;
-      newSpans.push(span);
-      container.appendChild(span);
-    }
+  const span = document.createElement('span');
+  span.innerHTML = markdownToHtml(newText);
+  if (oldText !== newText) {
+    span.style.backgroundColor = '#fefce8';
+    span.style.borderRadius = '2px';
+    highlightSpans = [span];
+  } else {
+    highlightSpans = [];
   }
+  container.appendChild(span);
 
   node.replaceWith(container);
   lastEditContainer = container;
-
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    newSpans.forEach(span => { span.style.backgroundColor = 'transparent'; });
-  }));
 }
 
 interface DocumentContext {
@@ -719,39 +764,83 @@ function resetHint(): void {
   if (send) send.style.display = 'none';
 }
 
-let undoHintTimer: ReturnType<typeof setTimeout> | null = null;
-
-function showUndoHint(): void {
+function showAcceptBar(): void {
   if (!promptWrapper) return;
-  const hint = promptWrapper.querySelector('#undo-hint') as HTMLElement;
-  const label = promptWrapper.querySelector('#undo-hint-label') as HTMLElement;
-
-  const isMac = /Mac|iPhone|iPad/i.test(navigator.platform);
-  label.textContent = `${isMac ? '⌘Z' : 'Ctrl+Z'} to undo`;
-
+  const bar = promptWrapper.querySelector('#accept-bar') as HTMLElement;
   positionWrapper();
   if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
   promptWrapper.style.display = 'block';
-  hint.style.display = 'flex';
-  hint.style.opacity = '1';
-  hint.style.transition = '';
-
-  if (undoHintTimer) clearTimeout(undoHintTimer);
-  undoHintTimer = setTimeout(() => {
-    hint.style.transition = 'opacity 0.4s ease';
-    hint.style.opacity = '0';
-    undoHintTimer = setTimeout(() => {
-      hint.style.display = 'none';
-      hint.style.transition = '';
-      if (!inPromptMode && !captured) promptWrapper!.style.display = 'none';
-      undoHintTimer = null;
-    }, 400);
-  }, 2500);
+  bar.style.display = 'flex';
 }
 
-function hideUndoHint(): void {
-  if (undoHintTimer) { clearTimeout(undoHintTimer); undoHintTimer = null; }
-  const hint = promptWrapper?.querySelector('#undo-hint') as HTMLElement | null;
+function hideAcceptBar(): void {
+  const bar = promptWrapper?.querySelector('#accept-bar') as HTMLElement | null;
+  if (bar) bar.style.display = 'none';
+}
+
+function showRedoHint(): void {
+  if (!promptWrapper) return;
+  const hint = promptWrapper.querySelector('#redo-hint') as HTMLElement;
+  hint.style.display = 'flex';
+}
+
+function hideRedoHint(): void {
+  const hint = promptWrapper?.querySelector('#redo-hint') as HTMLElement | null;
   if (hint) hint.style.display = 'none';
+}
+
+function acceptChanges(): void {
+  if (!interceptNextUndo) return;
+  highlightSpans.forEach(span => { span.style.backgroundColor = ''; });
+  highlightSpans = [];
+  interceptNextUndo = false;
+  hideAcceptBar();
+
+  if (lastEditContainer?.parentNode) {
+    editor?.focus();
+    const range = document.createRange();
+    range.selectNodeContents(lastEditContainer);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    captured = {
+      text: lastEditNewText,
+      range: range.cloneRange(),
+      rect: range.getBoundingClientRect(),
+    };
+    positionWrapper();
+    showPill(true);
+  }
+}
+
+function performAIUndo(): void {
+  if (!interceptNextUndo || !lastEditContainer?.parentNode) return;
+  interceptNextUndo = false;
+  hideAcceptBar();
+  highlightSpans = [];
+
+  const parent = lastEditContainer.parentNode!;
+  const restored = document.createTextNode(lastEditOriginalText);
+  parent.insertBefore(restored, lastEditContainer);
+  lastEditContainer.remove();
+  lastEditContainer = null;
+  lastRestoredNode = restored;
+
+  editor?.focus();
+  const range = document.createRange();
+  range.selectNode(restored);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+
+  captured = {
+    text: lastEditOriginalText,
+    range: range.cloneRange(),
+    rect: range.getBoundingClientRect(),
+  };
+  positionWrapper();
+  promptWrapper!.style.display = 'block';
+  promptOpenedByUndo = true;
+  activatePromptModeWithPrompt(lastPromptUsed);
 }
 
